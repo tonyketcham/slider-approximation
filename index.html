@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Optimized CSS Houdini Slider Collage</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #222;
+      }
+      /* The grid container holds the sliders and carries the compact color string */
+      #grid {
+        display: grid;
+        width: 100vw;
+        height: 100vh;
+        gap: 2px;
+        --colors: ''; /* Initially empty */
+      }
+      /* Force each slider to inherit the parent's --colors value */
+      #grid input[type='range'] {
+        --colors: inherit;
+      }
+      /* Base slider styling */
+      input[type='range'] {
+        -webkit-appearance: none;
+        width: 100%;
+        height: 30px;
+        background: transparent;
+      }
+      /* Use the CSS Houdini paint worklet to render the slider track */
+      input[type='range']::-webkit-slider-runnable-track {
+        width: 100%;
+        height: 8px;
+        cursor: pointer;
+        border-radius: 3px;
+        background: paint(sliderTrack);
+      }
+      input[type='range']::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        height: 20px;
+        width: 20px;
+        border: none;
+        border-radius: 50%;
+        margin-top: -6px;
+        cursor: pointer;
+        background: paint(sliderTrack);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Hidden video element for the webcam stream -->
+    <video id="video" autoplay playsinline style="display: none"></video>
+    <!-- Canvas for sampling a downscaled version of the webcam frame -->
+    <canvas id="canvas" style="display: none"></canvas>
+    <!-- Grid container for the sliders -->
+    <div id="grid"></div>
+
+    <script>
+      // --------------------------
+      // Register a CSS Houdini paint worklet that uses two custom properties:
+      //   --colors: A compact string of hex codes (each 6 characters, no delimiter)
+      //   --slider-index: A static index per slider
+      // It computes the offset into the colors string and uses that color for painting.
+      // --------------------------
+      const sliderPaintCode = `
+      class SliderTrackPainter {
+        static get inputProperties() {
+          return ['--colors', '--slider-index'];
+        }
+        paint(ctx, geom, properties) {
+          const colorsStr = properties.get('--colors').toString().trim();
+          const idxStr = properties.get('--slider-index').toString().trim();
+          const index = parseInt(idxStr, 10) || 0;
+          const hexLength = 6; // Each color is encoded as 6 hex digits.
+          const offset = index * hexLength;
+          const colorCode = colorsStr.substr(offset, hexLength);
+          // If we didn’t get a full color, default to black.
+          ctx.fillStyle = colorCode.length === hexLength ? '#' + colorCode : '#000';
+          ctx.fillRect(0, 0, geom.width, geom.height);
+        }
+      }
+      registerPaint('sliderTrack', SliderTrackPainter);
+    `;
+      const blob = new Blob([sliderPaintCode], {
+        type: 'application/javascript',
+      });
+      const blobUrl = URL.createObjectURL(blob);
+      CSS.paintWorklet.addModule(blobUrl);
+
+      // --------------------------
+      // Grid & Slider Setup
+      // --------------------------
+      const GRID_COLS = 20;
+      const GRID_ROWS = 20;
+      const NUM_SLIDERS = GRID_COLS * GRID_ROWS;
+      const grid = document.getElementById('grid');
+      grid.style.gridTemplateColumns = `repeat(${GRID_COLS}, 1fr)`;
+
+      // Create slider elements. Each slider gets a static --slider-index.
+      const sliders = [];
+      for (let i = 0; i < NUM_SLIDERS; i++) {
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = 0;
+        slider.max = 100;
+        slider.value = 50;
+        slider.style.setProperty('--slider-index', i);
+        grid.appendChild(slider);
+        sliders.push(slider);
+      }
+
+      // --------------------------
+      // Video & Canvas Setup
+      // --------------------------
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+
+      // Request access to the webcam.
+      navigator.mediaDevices
+        .getUserMedia({ video: true })
+        .then((stream) => {
+          video.srcObject = stream;
+          video.onloadedmetadata = () => {
+            video.play();
+            // Downscale the canvas to match the grid resolution (one pixel per slider).
+            canvas.width = GRID_COLS;
+            canvas.height = GRID_ROWS;
+            requestAnimationFrame(updateFrame);
+          };
+        })
+        .catch((err) => console.error('Webcam access error:', err));
+
+      // Helper to convert a value to a two-digit hex string.
+      function toHex(value) {
+        return value.toString(16).padStart(2, '0');
+      }
+
+      // --------------------------
+      // Main update loop.
+      // --------------------------
+      function updateFrame() {
+        // Draw the current video frame scaled down to the grid resolution.
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        // Retrieve pixel data (each pixel corresponds to one slider).
+        const imageData = ctx.getImageData(
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        ).data;
+        let colors = '';
+        // For each slider, encode its corresponding pixel as a compact hex string.
+        for (let i = 0; i < NUM_SLIDERS; i++) {
+          const offset = i * 4;
+          const r = imageData[offset];
+          const g = imageData[offset + 1];
+          const b = imageData[offset + 2];
+          colors += toHex(r) + toHex(g) + toHex(b);
+        }
+        // Batch-update the grid container's custom property with the compact color string.
+        grid.style.setProperty('--colors', colors);
+        requestAnimationFrame(updateFrame);
+      }
+    </script>
+  </body>
+</html>
