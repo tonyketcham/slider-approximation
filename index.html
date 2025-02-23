@@ -2,14 +2,14 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Throttled CSS Houdini Slider Collage - Expanded Grid</title>
+    <title>Optimized Virtualized Slider Collage</title>
     <style>
       body {
         margin: 0;
-        overflow: hidden;
+        overflow: auto;
         background: #222;
       }
-      /* Grid container now has a reduced gap */
+      /* Grid container – if the grid is huge, allow scrolling */
       #grid {
         display: grid;
         width: 100svw;
@@ -49,20 +49,12 @@
     </style>
   </head>
   <body>
-    <!-- Hidden video element for the webcam stream -->
     <video id="video" autoplay playsinline style="display: none"></video>
-    <!-- Canvas for sampling a downscaled version of the webcam frame -->
     <canvas id="canvas" style="display: none"></canvas>
-    <!-- Grid container for the sliders -->
     <div id="grid"></div>
 
     <script>
-      // --------------------------
-      // Register a CSS Houdini paint worklet that uses two custom properties:
-      //   --colors: A compact string of hex codes (each 6 characters, no delimiter)
-      //   --slider-index: A static index per slider.
-      // It computes the offset into the colors string and uses that color for painting.
-      // --------------------------
+      // Register Houdini paint worklet (unchanged)
       const sliderPaintCode = `
       class SliderTrackPainter {
         static get inputProperties() {
@@ -87,18 +79,16 @@
       const blobUrl = URL.createObjectURL(blob);
       CSS.paintWorklet.addModule(blobUrl);
 
-      // --------------------------
       // Grid & Slider Setup
-      // Increase grid size: more columns and rows.
-      // --------------------------
       const GRID_COLS = 15;
       const GRID_ROWS = 50;
       const NUM_SLIDERS = GRID_COLS * GRID_ROWS;
       const grid = document.getElementById('grid');
       grid.style.gridTemplateColumns = `repeat(${GRID_COLS}, 1fr)`;
 
-      // Create slider elements. Each slider gets a static --slider-index.
       const sliders = [];
+      // We'll also track each slider's visibility.
+      const sliderVisible = new Array(NUM_SLIDERS).fill(true);
       for (let i = 0; i < NUM_SLIDERS; i++) {
         const slider = document.createElement('input');
         slider.type = 'range';
@@ -110,9 +100,22 @@
         sliders.push(slider);
       }
 
-      // --------------------------
+      // Use IntersectionObserver to mark which sliders are visible.
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            const idx = Number(entry.target.getAttribute('data-index'));
+            sliderVisible[idx] = entry.isIntersecting;
+          });
+        },
+        { threshold: 0.1 }
+      );
+      sliders.forEach((slider, i) => {
+        slider.setAttribute('data-index', i);
+        observer.observe(slider);
+      });
+
       // Video & Canvas Setup
-      // --------------------------
       const video = document.getElementById('video');
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -123,7 +126,6 @@
           video.srcObject = stream;
           video.onloadedmetadata = () => {
             video.play();
-            // Downscale the canvas to match the grid resolution (one pixel per slider)
             canvas.width = GRID_COLS;
             canvas.height = GRID_ROWS;
             requestAnimationFrame(updateFrame);
@@ -131,50 +133,22 @@
         })
         .catch((err) => console.error('Webcam access error:', err));
 
-      // --------------------------
-      // Helper: Convert value to a two-digit hex string.
-      // --------------------------
+      // Helper: Convert value to two-digit hex.
       function toHex(value) {
         return value.toString(16).padStart(2, '0');
       }
 
-      // --------------------------
-      // Caches for slider colors and brightness values.
-      // --------------------------
+      // Caches for slider colors, brightness, and raw RGB.
       const cachedColors = new Array(NUM_SLIDERS).fill('');
       const cachedBrightness = new Array(NUM_SLIDERS).fill(null);
+      const cachedRGB = new Array(NUM_SLIDERS).fill({ r: 0, g: 0, b: 0 });
       let lastColorString = '';
       let pendingColorString = '';
-      let idleUpdateScheduled = false;
+      const throttleThreshold = 50;
+      let lastCssUpdateTime = performance.now();
+      const colorThreshold = 10; // Only update if color change is significant.
 
-      // --------------------------
-      // Schedule a throttled update of the CSS variable using requestIdleCallback.
-      // --------------------------
-      function scheduleIdleUpdate() {
-        if (!idleUpdateScheduled) {
-          idleUpdateScheduled = true;
-          if (window.requestIdleCallback) {
-            requestIdleCallback(() => {
-              grid.style.setProperty('--colors', pendingColorString);
-              lastColorString = pendingColorString;
-              idleUpdateScheduled = false;
-            });
-          } else {
-            // Fallback if requestIdleCallback is not available.
-            setTimeout(() => {
-              grid.style.setProperty('--colors', pendingColorString);
-              lastColorString = pendingColorString;
-              idleUpdateScheduled = false;
-            }, 16);
-          }
-        }
-      }
-
-      // --------------------------
-      // Main update loop.
-      // --------------------------
       function updateFrame() {
-        // Draw the current video frame scaled down to the grid resolution.
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(
           0,
@@ -185,34 +159,43 @@
         let colorsChanged = false;
 
         for (let i = 0; i < NUM_SLIDERS; i++) {
+          // If slider is not visible, skip updating it.
+          if (!sliderVisible[i]) continue;
+
           const offset = i * 4;
           const r = imageData[offset];
           const g = imageData[offset + 1];
           const b = imageData[offset + 2];
-          // Create compact hex color string.
-          const newColor = toHex(r) + toHex(g) + toHex(b);
-          // Compute brightness (0-100) for slider value.
-          const brightness = Math.round(
-            (0.299 * r + 0.587 * g + 0.114 * b) / 2.55
-          );
 
-          // Cache and mark update if color has changed.
-          if (cachedColors[i] !== newColor) {
+          const prevRGB = cachedRGB[i];
+          const diff = Math.sqrt(
+            (r - prevRGB.r) ** 2 + (g - prevRGB.g) ** 2 + (b - prevRGB.b) ** 2
+          );
+          if (diff > colorThreshold) {
+            cachedRGB[i] = { r, g, b };
+            const newColor = toHex(r) + toHex(g) + toHex(b);
             cachedColors[i] = newColor;
             colorsChanged = true;
-          }
-          // Update slider brightness only when it changes.
-          if (cachedBrightness[i] !== brightness) {
-            cachedBrightness[i] = brightness;
-            sliders[i].value = brightness;
+
+            const brightness = Math.round(
+              (0.299 * r + 0.587 * g + 0.114 * b) / 2.55
+            );
+            if (cachedBrightness[i] !== brightness) {
+              cachedBrightness[i] = brightness;
+              sliders[i].value = brightness;
+            }
           }
         }
 
-        // If any slider's color changed, update the pendingColorString.
         if (colorsChanged) {
           pendingColorString = cachedColors.join('');
-          if (pendingColorString !== lastColorString) {
-            scheduleIdleUpdate();
+          if (
+            pendingColorString !== lastColorString &&
+            performance.now() - lastCssUpdateTime >= throttleThreshold
+          ) {
+            grid.style.setProperty('--colors', pendingColorString);
+            lastColorString = pendingColorString;
+            lastCssUpdateTime = performance.now();
           }
         }
         requestAnimationFrame(updateFrame);
